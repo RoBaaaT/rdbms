@@ -1,0 +1,7 @@
+[package]
+name = "rdbms"
+version = "0.1.0"
+authors = ["Robert Lasch <robert.lasch@tu-ilmenau.de>"]
+edition = "2018"
+
+[dependencies]
