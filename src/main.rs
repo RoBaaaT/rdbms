@@ -9,6 +9,7 @@ use std::sync::RwLock;
 
 use crate::ps_protocol::handle_connection;
 use crate::threadpool::ThreadPool;
+use crate::core::AttributeValueContainer;
 
 fn main() {
     let dict = Box::new(core::BigIntDict { entries: vec![1, 5, 7, 2311] });
@@ -17,10 +18,12 @@ fn main() {
     avc.data.push(2);
     avc.data.push(0);
     avc.data.push(0);
+    avc.data.push(avc.null_value_id() as u32);
     avc.data.push(1);
     avc.data.push(3);
     avc.data.push(1);
     avc.data.push(0);
+    avc.data.push(avc.null_value_id() as u32);
     avc.data.push(1);
     let db = Arc::new(RwLock::new(core::Database { avc: RwLock::new(Box::new(avc)) }));
     // avc lookup test
@@ -28,7 +31,7 @@ fn main() {
         let db = db.read().unwrap();
         let avc = db.avc.read().unwrap();
         for i in 0..avc.len() {
-            println!("{}", avc.lookup(i));
+            println!("{:?}", avc.lookup(i));
         }
     }
 

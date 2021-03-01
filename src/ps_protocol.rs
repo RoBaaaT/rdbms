@@ -122,10 +122,15 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
                     data_row_buf.extend_from_slice(&(val_str_b.len() as u32).to_be_bytes());
                     data_row_buf.extend_from_slice(val_str_b);
                     // value 2
-                    let val_str = avc.lookup(i).to_string();
-                    let val_str_b = val_str.as_bytes();
-                    data_row_buf.extend_from_slice(&(val_str_b.len() as u32).to_be_bytes());
-                    data_row_buf.extend_from_slice(val_str_b);
+                    match avc.lookup(i) {
+                        None => data_row_buf.extend_from_slice(&(-1 as i32).to_be_bytes()),
+                        Some(val) => {
+                            let val_str = val.to_string();
+                            let val_str_b = val_str.as_bytes();
+                            data_row_buf.extend_from_slice(&(val_str_b.len() as u32).to_be_bytes());
+                            data_row_buf.extend_from_slice(val_str_b);
+                        }
+                    }
                     send_protocol_message(&mut stream, 'D', &data_row_buf).unwrap();
                 }
                 // CommandComplete
