@@ -5,3 +5,4 @@ authors = ["Robert Lasch <robert.lasch@tu-ilmenau.de>"]
 edition = "2018"
 
 [dependencies]
+sqlparser = "0.8.0"

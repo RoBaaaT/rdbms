@@ -7,6 +7,10 @@ use std::str;
 use std::sync::Arc;
 use std::sync::RwLock;
 
+use sqlparser::dialect::GenericDialect;
+use sqlparser::parser::Parser;
+use sqlparser::ast::*;
+
 use crate::core::Database;
 
 pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
@@ -95,51 +99,64 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
         let mut message_content = vec![0; message_len];
         stream.read_exact(message_content.as_mut_slice()).unwrap();
         let message_type = type_buffer[0] as char;
-        println!("Message: {}", message_type);
         match message_type {
             'Q' => {
                 // get the query string
-                let query_string = match str::from_utf8(&message_content) {
+                let query_string = match str::from_utf8(&message_content[0..message_len - 1]) {
                     Ok(v) => v,
                     Err(e) => panic!("Invalid UTF-8 sequence: {}", e),
                 };
-                println!("{}", query_string);
-                // RowDescription
-                //                                   OID         ANUM  TYPE_OID    TYPLENTYPMOD      FORMAT_CODE
-                let row_desc_buf = [0, 2, 'i' as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 4, 0, 0, 0, 0, 0, 0, 'v' as u8, 'a' as u8, 'l' as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 4, 0, 0, 0, 0, 0, 0];
-                send_protocol_message(&mut stream, 'T', &row_desc_buf).unwrap();
-                // read some dummy data from db
-                let db = db.read().unwrap();
-                let avc = db.avc.read().unwrap();
-                for i in 0..avc.len() {
-                    // DataRow
-                    let mut data_row_buf = Vec::<u8>::new();
-                    data_row_buf.push(0);
-                    data_row_buf.push(2);
-                    // value 1
-                    let val_str = i.to_string();
-                    let val_str_b = val_str.as_bytes();
-                    data_row_buf.extend_from_slice(&(val_str_b.len() as u32).to_be_bytes());
-                    data_row_buf.extend_from_slice(val_str_b);
-                    // value 2
-                    match avc.lookup(i) {
-                        None => data_row_buf.extend_from_slice(&(-1 as i32).to_be_bytes()),
-                        Some(val) => {
-                            let val_str = val.to_string();
-                            let val_str_b = val_str.as_bytes();
-                            data_row_buf.extend_from_slice(&(val_str_b.len() as u32).to_be_bytes());
-                            data_row_buf.extend_from_slice(val_str_b);
+                let dialect = GenericDialect {};
+                match Parser::parse_sql(&dialect, query_string) {
+                    Ok(statements) => {
+                        for statement in statements {
+                            println!("{:?}", statement);
+                            // RowDescription
+                            //                                   OID         ANUM  TYPE_OID    TYPLENTYPMOD      FORMAT_CODE
+                            let row_desc_buf = [0, 2, 'i' as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 4, 0, 0, 0, 0, 0, 0, 'v' as u8, 'a' as u8, 'l' as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 4, 0, 0, 0, 0, 0, 0];
+                            send_protocol_message(&mut stream, 'T', &row_desc_buf).unwrap();
+                            // read some dummy data from db
+                            let db = db.read().unwrap();
+                            let avc = db.avc.read().unwrap();
+                            for i in 0..avc.len() {
+                                // DataRow
+                                let mut data_row_buf = Vec::<u8>::new();
+                                data_row_buf.push(0);
+                                data_row_buf.push(2);
+                                // value 1
+                                let val_str = i.to_string();
+                                let val_str_b = val_str.as_bytes();
+                                data_row_buf.extend_from_slice(&(val_str_b.len() as u32).to_be_bytes());
+                                data_row_buf.extend_from_slice(val_str_b);
+                                // value 2
+                                match avc.lookup(i) {
+                                    None => data_row_buf.extend_from_slice(&(-1 as i32).to_be_bytes()),
+                                    Some(val) => {
+                                        let val_str = val.to_string();
+                                        let val_str_b = val_str.as_bytes();
+                                        data_row_buf.extend_from_slice(&(val_str_b.len() as u32).to_be_bytes());
+                                        data_row_buf.extend_from_slice(val_str_b);
+                                    }
+                                }
+                                send_protocol_message(&mut stream, 'D', &data_row_buf).unwrap();
+                            }
+                            // CommandComplete
+                            send_protocol_message(&mut stream, 'C', "SELECT\0".as_bytes()).unwrap();
                         }
                     }
-                    send_protocol_message(&mut stream, 'D', &data_row_buf).unwrap();
+                    Err(err) => {
+                        println!("Invalid query: {:?}", err);
+                        // TODO: send error message
+                    }
                 }
-                // CommandComplete
-                send_protocol_message(&mut stream, 'C', "SELECT\0".as_bytes()).unwrap();
                 // ReadyForQuery
                 send_protocol_message(&mut stream, 'Z', &['I' as u8]).unwrap();
             },
             'X' => break,
-            _ => continue
+            _ => {
+                println!("Unhandled message: {}", message_type);
+                continue;
+            }
         };
     }
     println!("Client disconnected");
