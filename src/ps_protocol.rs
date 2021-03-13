@@ -9,9 +9,9 @@ use std::sync::RwLock;
 
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
-use sqlparser::ast::*;
 
 use crate::core::Database;
+use crate::lqp::LQP;
 
 pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
     let mut parameters = HashMap::new();
@@ -101,6 +101,11 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
         let message_type = type_buffer[0] as char;
         match message_type {
             'Q' => {
+                let db = db.read().unwrap();
+                // for now just use a new TransactionContext for each incoming query message
+                // TODO: proper handling of BEGIN/COMMIT/ROLLBACK/ABORT
+                let transaction_context = db.transaction_manager.lock().unwrap().new_transaction_context();
+
                 // get the query string
                 let query_string = match str::from_utf8(&message_content[0..message_len - 1]) {
                     Ok(v) => v,
@@ -110,13 +115,14 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
                 match Parser::parse_sql(&dialect, query_string) {
                     Ok(statements) => {
                         for statement in statements {
-                            println!("{:?}", statement);
+                            let lqp = LQP::from(&statement);
+                            println!("Parsed SQL: {:?}", statement);
+                            println!("LQP: {:?}", lqp);
                             // RowDescription
                             //                                   OID         ANUM  TYPE_OID    TYPLENTYPMOD      FORMAT_CODE
                             let row_desc_buf = [0, 2, 'i' as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 4, 0, 0, 0, 0, 0, 0, 'v' as u8, 'a' as u8, 'l' as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 4, 0, 0, 0, 0, 0, 0];
                             send_protocol_message(&mut stream, 'T', &row_desc_buf).unwrap();
                             // read some dummy data from db
-                            let db = db.read().unwrap();
                             let avc = db.avc.read().unwrap();
                             for i in 0..avc.len() {
                                 // DataRow
