@@ -87,9 +87,39 @@ impl LQP {
         let node = LQPNode::from(&sql_statement, &mut expressions)?;
         Ok(LQP { expressions: expressions, root_node: node })
     }
+
+    pub fn get_dot_graph(&self) -> String {
+        let mut nodes = String::new();
+        let mut edges = String::new();
+        let mut id: usize = 0;
+        self.root_node.create_dot_plan_nodes_and_edges(&mut id, &mut nodes, &mut edges);
+        format!("digraph logical_plan {{\n{}\n{}}}", nodes, edges)
+    }
 }
 
 impl LQPNode {
+    pub fn create_dot_plan_nodes_and_edges(&self, id: &mut usize, nodes: &mut String, edges: &mut String) {
+        nodes.push_str(&self.get_dot_node(*id));
+        let self_id = *id;
+        if let Some(left) = &self.inputs[0] {
+            *id += 1;
+            edges.push_str(&format!("plannode_{}->plannode_{}\n", self_id, id));
+            left.create_dot_plan_nodes_and_edges(id, nodes, edges);
+        }
+        if let Some(right) = &self.inputs[1] {
+            *id += 1;
+            edges.push_str(&format!("plannode_{}->plannode_{}\n", self_id, id));
+            right.create_dot_plan_nodes_and_edges(id, nodes, edges);
+        }
+    }
+
+    pub fn get_dot_node(&self, id: usize) -> String {
+        match &self.data {
+            LQPNodeData::Table { table_name, .. } => format!("plannode_{}[label=\"{{Table [{}]}}\", style=\"rounded\", shape=record];\n", id, table_name),
+            _ => format!("plannode_{}[label=\"{{{:?}}}\", style=\"rounded\", shape=record];\n", id, self.data)
+        }
+    }
+
     pub fn from(sql_statement: &Statement, expressions: &mut Vec<Rc<LQPExpression>>) -> Result<Rc<LQPNode>, LQPError> {
         match sql_statement {
             Statement::Query(query) => Ok(LQPNode::from_query(query, expressions)?),

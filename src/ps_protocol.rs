@@ -1,5 +1,6 @@
 use std::io;
 use std::io::prelude::*;
+use std::fs::File;
 use std::net::TcpStream;
 use std::convert::TryInto;
 use std::collections::HashMap;
@@ -117,34 +118,40 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
                         for statement in statements {
                             let lqp = LQP::from(&statement);
                             println!("Parsed SQL: {:?}", statement);
-                            println!("LQP: {:?}", lqp);
-                            // RowDescription
-                            //                                   OID         ANUM  TYPE_OID    TYPLENTYPMOD      FORMAT_CODE
-                            let row_desc_buf = [0, 2, 'i' as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 4, 0, 0, 0, 0, 0, 0, 'v' as u8, 'a' as u8, 'l' as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 4, 0, 0, 0, 0, 0, 0];
-                            send_protocol_message(&mut stream, 'T', &row_desc_buf).unwrap();
-                            // read some dummy data from db
-                            let avc = db.avc.read().unwrap();
-                            for i in 0..avc.len() {
-                                // DataRow
-                                let mut data_row_buf = Vec::<u8>::new();
-                                data_row_buf.push(0);
-                                data_row_buf.push(2);
-                                // value 1
-                                let val_str = i.to_string();
-                                let val_str_b = val_str.as_bytes();
-                                data_row_buf.extend_from_slice(&(val_str_b.len() as u32).to_be_bytes());
-                                data_row_buf.extend_from_slice(val_str_b);
-                                // value 2
-                                match avc.lookup(i) {
-                                    None => data_row_buf.extend_from_slice(&(-1 as i32).to_be_bytes()),
-                                    Some(val) => {
-                                        let val_str = val.to_string();
-                                        let val_str_b = val_str.as_bytes();
-                                        data_row_buf.extend_from_slice(&(val_str_b.len() as u32).to_be_bytes());
-                                        data_row_buf.extend_from_slice(val_str_b);
+                            if let Ok(lqp) = lqp {
+                                println!("LQP: {:?}", lqp);
+                                // TEMPORARY: write the LQP to file as a dot graph
+                                let mut file = File::create("lqp.dot").unwrap();
+                                file.write_all(lqp.get_dot_graph().as_bytes()).unwrap();
+
+                                // RowDescription
+                                //                                   OID         ANUM  TYPE_OID    TYPLENTYPMOD      FORMAT_CODE
+                                let row_desc_buf = [0, 2, 'i' as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 4, 0, 0, 0, 0, 0, 0, 'v' as u8, 'a' as u8, 'l' as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 4, 0, 0, 0, 0, 0, 0];
+                                send_protocol_message(&mut stream, 'T', &row_desc_buf).unwrap();
+                                // read some dummy data from db
+                                let avc = db.avc.read().unwrap();
+                                for i in 0..avc.len() {
+                                    // DataRow
+                                    let mut data_row_buf = Vec::<u8>::new();
+                                    data_row_buf.push(0);
+                                    data_row_buf.push(2);
+                                    // value 1
+                                    let val_str = i.to_string();
+                                    let val_str_b = val_str.as_bytes();
+                                    data_row_buf.extend_from_slice(&(val_str_b.len() as u32).to_be_bytes());
+                                    data_row_buf.extend_from_slice(val_str_b);
+                                    // value 2
+                                    match avc.lookup(i) {
+                                        None => data_row_buf.extend_from_slice(&(-1 as i32).to_be_bytes()),
+                                        Some(val) => {
+                                            let val_str = val.to_string();
+                                            let val_str_b = val_str.as_bytes();
+                                            data_row_buf.extend_from_slice(&(val_str_b.len() as u32).to_be_bytes());
+                                            data_row_buf.extend_from_slice(val_str_b);
+                                        }
                                     }
+                                    send_protocol_message(&mut stream, 'D', &data_row_buf).unwrap();
                                 }
-                                send_protocol_message(&mut stream, 'D', &data_row_buf).unwrap();
                             }
                             // CommandComplete
                             send_protocol_message(&mut stream, 'C', "SELECT\0".as_bytes()).unwrap();
