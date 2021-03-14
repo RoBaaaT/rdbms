@@ -1,3 +1,4 @@
+use std::fmt;
 use std::rc::*;
 use sqlparser::ast::*;
 
@@ -79,6 +80,16 @@ pub enum LQPError {
     Generic,
     NotSupported(&'static str),
     ASTError(&'static str)
+}
+
+impl fmt::Display for LQPError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LQPError::Generic => write!(f, "Generic"),
+            LQPError::NotSupported(msg) =>  write!(f, "Not supported: {}", msg),
+            LQPError::ASTError(msg) =>  write!(f, "AST Error: {}", msg)
+        }
+    }
 }
 
 impl LQP {

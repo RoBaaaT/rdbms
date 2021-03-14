@@ -1,5 +1,6 @@
 use std::io;
 use std::io::prelude::*;
+use std::fmt;
 use std::fs::File;
 use std::net::TcpStream;
 use std::convert::TryInto;
@@ -9,7 +10,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use sqlparser::dialect::GenericDialect;
-use sqlparser::parser::Parser;
+use sqlparser::parser::{Parser, ParserError};
 
 use crate::core::Database;
 use crate::lqp::LQP;
@@ -118,48 +119,58 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
                         for statement in statements {
                             let lqp = LQP::from(&statement);
                             println!("Parsed SQL: {:?}", statement);
-                            if let Ok(lqp) = lqp {
-                                println!("LQP: {:?}", lqp);
-                                // TEMPORARY: write the LQP to file as a dot graph
-                                let mut file = File::create("lqp.dot").unwrap();
-                                file.write_all(lqp.get_dot_graph().as_bytes()).unwrap();
+                            match lqp {
+                                Ok(lqp) => {
+                                    println!("LQP: {:?}", lqp);
+                                    // TEMPORARY: write the LQP to file as a dot graph
+                                    let mut file = File::create("lqp.dot").unwrap();
+                                    file.write_all(lqp.get_dot_graph().as_bytes()).unwrap();
 
-                                // RowDescription
-                                //                                   OID         ANUM  TYPE_OID    TYPLENTYPMOD      FORMAT_CODE
-                                let row_desc_buf = [0, 2, 'i' as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 4, 0, 0, 0, 0, 0, 0, 'v' as u8, 'a' as u8, 'l' as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 4, 0, 0, 0, 0, 0, 0];
-                                send_protocol_message(&mut stream, 'T', &row_desc_buf).unwrap();
-                                // read some dummy data from db
-                                let avc = db.avc.read().unwrap();
-                                for i in 0..avc.len() {
-                                    // DataRow
-                                    let mut data_row_buf = Vec::<u8>::new();
-                                    data_row_buf.push(0);
-                                    data_row_buf.push(2);
-                                    // value 1
-                                    let val_str = i.to_string();
-                                    let val_str_b = val_str.as_bytes();
-                                    data_row_buf.extend_from_slice(&(val_str_b.len() as u32).to_be_bytes());
-                                    data_row_buf.extend_from_slice(val_str_b);
-                                    // value 2
-                                    match avc.lookup(i) {
-                                        None => data_row_buf.extend_from_slice(&(-1 as i32).to_be_bytes()),
-                                        Some(val) => {
-                                            let val_str = val.to_string();
-                                            let val_str_b = val_str.as_bytes();
-                                            data_row_buf.extend_from_slice(&(val_str_b.len() as u32).to_be_bytes());
-                                            data_row_buf.extend_from_slice(val_str_b);
+                                    // RowDescription
+                                    //                                   OID         ANUM  TYPE_OID    TYPLENTYPMOD      FORMAT_CODE
+                                    let row_desc_buf = [0, 2, 'i' as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 4, 0, 0, 0, 0, 0, 0, 'v' as u8, 'a' as u8, 'l' as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 4, 0, 0, 0, 0, 0, 0];
+                                    send_protocol_message(&mut stream, 'T', &row_desc_buf).unwrap();
+                                    // read some dummy data from db
+                                    let avc = db.avc.read().unwrap();
+                                    for i in 0..avc.len() {
+                                        // DataRow
+                                        let mut data_row_buf = Vec::<u8>::new();
+                                        data_row_buf.push(0);
+                                        data_row_buf.push(2);
+                                        // value 1
+                                        let val_str = i.to_string();
+                                        let val_str_b = val_str.as_bytes();
+                                        data_row_buf.extend_from_slice(&(val_str_b.len() as u32).to_be_bytes());
+                                        data_row_buf.extend_from_slice(val_str_b);
+                                        // value 2
+                                        match avc.lookup(i) {
+                                            None => data_row_buf.extend_from_slice(&(-1 as i32).to_be_bytes()),
+                                            Some(val) => {
+                                                let val_str = val.to_string();
+                                                let val_str_b = val_str.as_bytes();
+                                                data_row_buf.extend_from_slice(&(val_str_b.len() as u32).to_be_bytes());
+                                                data_row_buf.extend_from_slice(val_str_b);
+                                            }
                                         }
+                                        send_protocol_message(&mut stream, 'D', &data_row_buf).unwrap();
                                     }
-                                    send_protocol_message(&mut stream, 'D', &data_row_buf).unwrap();
+                                    // CommandComplete
+                                    send_protocol_message(&mut stream, 'C', "SELECT\0".as_bytes()).unwrap();
+                                },
+                                Err(err) => {
+                                    println!("LQP creation error: {:?}", err);
+                                    send_error_response(&mut stream, ErrorSeverity::Error, String::from("42000"), String::from("LQP error"), Some(err.to_string()), None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
                                 }
                             }
-                            // CommandComplete
-                            send_protocol_message(&mut stream, 'C', "SELECT\0".as_bytes()).unwrap();
                         }
                     }
                     Err(err) => {
-                        println!("Invalid query: {:?}", err);
-                        // TODO: send error message
+                        println!("Syntax error: {:?}", err);
+                        let message = match err {
+                            ParserError::TokenizerError(message) => message,
+                            ParserError::ParserError(message) => message
+                        };
+                        send_error_response(&mut stream, ErrorSeverity::Error, String::from("42601"), String::from("Syntax error"), Some(message), None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
                     }
                 }
                 // ReadyForQuery
@@ -184,4 +195,108 @@ fn send_protocol_message(stream: &mut TcpStream, message_type: char, buf: &[u8])
     result += stream.write(&(message_len as u32).to_be_bytes())?;
     result += stream.write(buf)?;
     return Ok(result);
+}
+
+enum ErrorSeverity {
+    Error,
+    Fatal,
+    Panic
+}
+
+impl fmt::Display for ErrorSeverity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ErrorSeverity::Error =>  write!(f, "ERROR"),
+            ErrorSeverity::Fatal =>  write!(f, "FATAL"),
+            ErrorSeverity::Panic =>  write!(f, "PANIC")
+        }
+    }
+}
+
+fn send_error_response(stream: &mut TcpStream, severity: ErrorSeverity, sqlstate: String, message: String, detail: Option<String>, hint: Option<String>, position: Option<usize>, internal_position: Option<usize>, internal_query: Option<String>, r#where: Option<String>, schema: Option<String>, table: Option<String>, column: Option<String>, data_type: Option<String>, constraint: Option<String>, file: Option<String>, line: Option<String>, routine: Option<String>) -> io::Result<usize> {
+    let mut buf = Vec::<u8>::new();
+    buf.push('S' as u8);
+    buf.extend_from_slice(severity.to_string().as_bytes());
+    buf.push(0);
+    buf.push('V' as u8);
+    buf.extend_from_slice(severity.to_string().as_bytes());
+    buf.push(0);
+    buf.push('C' as u8);
+    buf.extend_from_slice(sqlstate.as_bytes());
+    buf.push(0);
+    buf.push('M' as u8);
+    buf.extend_from_slice(message.as_bytes());
+    buf.push(0);
+    if let Some(detail) = detail {
+        buf.push('D' as u8);
+        buf.extend_from_slice(detail.as_bytes());
+        buf.push(0);
+    }
+    if let Some(hint) = hint {
+        buf.push('H' as u8);
+        buf.extend_from_slice(hint.as_bytes());
+        buf.push(0);
+    }
+    if let Some(position) = position {
+        buf.push('P' as u8);
+        buf.extend_from_slice(position.to_string().as_bytes());
+        buf.push(0);
+    }
+    if let Some(internal_position) = internal_position {
+        buf.push('p' as u8);
+        buf.extend_from_slice(internal_position.to_string().as_bytes());
+        buf.push(0);
+    }
+    if let Some(internal_query) = internal_query {
+        buf.push('D' as u8);
+        buf.extend_from_slice(internal_query.as_bytes());
+        buf.push(0);
+    }
+    if let Some(r#where) = r#where {
+        buf.push('W' as u8);
+        buf.extend_from_slice(r#where.as_bytes());
+        buf.push(0);
+    }
+    if let Some(schema) = schema {
+        buf.push('s' as u8);
+        buf.extend_from_slice(schema.as_bytes());
+        buf.push(0);
+    }
+    if let Some(table) = table {
+        buf.push('t' as u8);
+        buf.extend_from_slice(table.as_bytes());
+        buf.push(0);
+    }
+    if let Some(column) = column {
+        buf.push('c' as u8);
+        buf.extend_from_slice(column.as_bytes());
+        buf.push(0);
+    }
+    if let Some(data_type) = data_type {
+        buf.push('d' as u8);
+        buf.extend_from_slice(data_type.as_bytes());
+        buf.push(0);
+    }
+    if let Some(constraint) = constraint {
+        buf.push('n' as u8);
+        buf.extend_from_slice(constraint.as_bytes());
+        buf.push(0);
+    }
+    if let Some(file) = file {
+        buf.push('F' as u8);
+        buf.extend_from_slice(file.as_bytes());
+        buf.push(0);
+    }
+    if let Some(line) = line {
+        buf.push('L' as u8);
+        buf.extend_from_slice(line.as_bytes());
+        buf.push(0);
+    }
+    if let Some(routine) = routine {
+        buf.push('R' as u8);
+        buf.extend_from_slice(routine.as_bytes());
+        buf.push(0);
+    }
+    buf.push(0);
+    return send_protocol_message(stream, 'E', &buf)
 }
