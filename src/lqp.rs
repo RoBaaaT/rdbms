@@ -63,16 +63,17 @@ pub struct LQPExpression {
 
 #[derive(Debug)]
 pub struct LQPNode {
-    pub output: Option<Weak<LQPNode>>,
-    pub inputs: [Option<Rc<LQPNode>>; 2],
-    pub expressions: Vec<Rc<LQPExpression>>,
+    pub output: Option<usize>,
+    pub inputs: [Option<usize>; 2],
+    pub expressions: Vec<usize>,
     pub data: LQPNodeData
 }
 
 #[derive(Debug)]
 pub struct LQP {
-    pub expressions: Vec<Rc<LQPExpression>>,
-    pub root_node: Rc<LQPNode>
+    expressions: Vec<LQPExpression>,
+    nodes: Vec<LQPNode>,
+    root_node: usize
 }
 
 #[derive(Debug)]
@@ -94,36 +95,43 @@ impl fmt::Display for LQPError {
 
 impl LQP {
     pub fn from(sql_statement: &Statement) -> Result<LQP, LQPError> {
-        let mut expressions = Vec::new();
-        let node = LQPNode::from(&sql_statement, &mut expressions)?;
-        Ok(LQP { expressions: expressions, root_node: node })
+        let mut result = LQP { expressions: Vec::new(), nodes: Vec::new(), root_node: 0 };
+        let node = LQPNode::from(&sql_statement, &mut result)?;
+        result.root_node = node;
+        Ok(result)
     }
 
     pub fn get_dot_graph(&self) -> String {
         let mut nodes = String::new();
         let mut edges = String::new();
-        let mut id: usize = 0;
-        self.root_node.create_dot_plan_nodes_and_edges(&mut id, &mut nodes, &mut edges);
+        self.create_dot_plan_nodes_and_edges(self.root_node, &mut nodes, &mut edges);
         format!("digraph logical_plan {{\n{}\n{}}}", nodes, edges)
+    }
+
+    pub fn create_dot_plan_nodes_and_edges(&self, id: usize, nodes: &mut String, edges: &mut String) {
+        let node = &self.nodes[id];
+        nodes.push_str(&node.get_dot_node(id));
+        if let Some(left) = node.inputs[0] {
+            edges.push_str(&format!("plannode_{}->plannode_{}\n", id, left));
+            self.create_dot_plan_nodes_and_edges(left, nodes, edges);
+        }
+        if let Some(right) = node.inputs[1] {
+            edges.push_str(&format!("plannode_{}->plannode_{}\n", id, right));
+            self.create_dot_plan_nodes_and_edges(right, nodes, edges);
+        }
+    }
+
+    pub fn add_node(&mut self, node: LQPNode) -> usize {
+        self.nodes.push(node);
+        self.nodes.len() - 1
+    }
+
+    pub fn set_output(&mut self, node_id: usize, output_node_id: usize) {
+        self.nodes[node_id].output = Some(output_node_id)
     }
 }
 
 impl LQPNode {
-    pub fn create_dot_plan_nodes_and_edges(&self, id: &mut usize, nodes: &mut String, edges: &mut String) {
-        nodes.push_str(&self.get_dot_node(*id));
-        let self_id = *id;
-        if let Some(left) = &self.inputs[0] {
-            *id += 1;
-            edges.push_str(&format!("plannode_{}->plannode_{}\n", self_id, id));
-            left.create_dot_plan_nodes_and_edges(id, nodes, edges);
-        }
-        if let Some(right) = &self.inputs[1] {
-            *id += 1;
-            edges.push_str(&format!("plannode_{}->plannode_{}\n", self_id, id));
-            right.create_dot_plan_nodes_and_edges(id, nodes, edges);
-        }
-    }
-
     pub fn get_dot_node(&self, id: usize) -> String {
         match &self.data {
             LQPNodeData::Table { table_name, .. } => format!("plannode_{}[label=\"{{Table [{}]}}\", style=\"rounded\", shape=record];\n", id, table_name),
@@ -131,14 +139,14 @@ impl LQPNode {
         }
     }
 
-    pub fn from(sql_statement: &Statement, expressions: &mut Vec<Rc<LQPExpression>>) -> Result<Rc<LQPNode>, LQPError> {
+    pub fn from(sql_statement: &Statement, lqp: &mut LQP) -> Result<usize, LQPError> {
         match sql_statement {
-            Statement::Query(query) => Ok(LQPNode::from_query(query, expressions)?),
+            Statement::Query(query) => Ok(LQPNode::from_query(query, lqp)?),
             _ => Err(LQPError::Generic)
         }
     }
 
-    pub fn from_query(query: &Query, expressions: &mut Vec<Rc<LQPExpression>>) -> Result<Rc<LQPNode>, LQPError> {
+    pub fn from_query(query: &Query, lqp: &mut LQP) -> Result<usize, LQPError> {
         if let Some(_) = query.with {
             return Err(LQPError::NotSupported("WITH"))
         }
@@ -155,13 +163,13 @@ impl LQPNode {
             return Err(LQPError::NotSupported("FETCH"))
         }
         if let SetExpr::Select(select) = &query.body {
-            LQPNode::from_select(&select, expressions)
+            LQPNode::from_select(&select, lqp)
         } else {
             Err(LQPError::NotSupported("SetExpr!=SELECT"))
         }
     }
 
-    pub fn from_select(select: &Select, expressions: &mut Vec<Rc<LQPExpression>>) -> Result<Rc<LQPNode>, LQPError> {
+    pub fn from_select(select: &Select, lqp: &mut LQP) -> Result<usize, LQPError> {
         if select.distinct {
             return Err(LQPError::NotSupported("DISTINCT"))
         }
@@ -181,21 +189,22 @@ impl LQPNode {
             return Err(LQPError::NotSupported("SORT BY"))
         }
 
-        let mut from = LQPNode::from_from(&select.from, expressions)?;
+        let mut from = LQPNode::from_from(&select.from, lqp)?;
         if let Some(selection) = &select.selection {
             // TODO: filter expressions
-            from = Rc::new(LQPNode { output: None, inputs: [Some(from), None], expressions: Vec::new(), data: LQPNodeData::Filter });
-            //from.inputs[0].unwrap().output = Some(Rc::downgrade(&from));
+            let new_from = lqp.add_node(LQPNode { output: None, inputs: [Some(from), None], expressions: Vec::new(), data: LQPNodeData::Filter });
+            lqp.set_output(from, new_from);
+            from = new_from;
         }
         // TODO: group by
         // TODO: having
         // TODO: projection expressions
-        let projection = Rc::new(LQPNode { output: None, inputs: [Some(from), None], expressions: Vec::new(), data: LQPNodeData::Projection });
-        //from.output = Some(Rc::downgrade(&projection));
+        let projection = lqp.add_node(LQPNode { output: None, inputs: [Some(from), None], expressions: Vec::new(), data: LQPNodeData::Projection });
+        lqp.set_output(from, projection);
         return Ok(projection);
     }
 
-    pub fn from_from(from: &Vec<TableWithJoins>, expressions: &mut Vec<Rc<LQPExpression>>) -> Result<Rc<LQPNode>, LQPError> {
+    pub fn from_from(from: &Vec<TableWithJoins>, lqp: &mut LQP) -> Result<usize, LQPError> {
         let mut node = None;
         for twj in from.iter() {
             if twj.joins.len() > 0 {
@@ -206,14 +215,14 @@ impl LQPNode {
             match &twj.relation {
                 TableFactor::Table { name, .. } => {
                     let prev_node = node;
-                    let table_node = LQPNode { output: None, inputs: [None, None], expressions: Vec::new(), data: LQPNodeData::Table { schema_name: None, table_name: name.0[0].value.clone() } };
+                    let table_node = lqp.add_node(LQPNode { output: None, inputs: [None, None], expressions: Vec::new(), data: LQPNodeData::Table { schema_name: None, table_name: name.0[0].value.clone() } });
                     node = match prev_node {
                         Some(prev_node) => {
                             // cross product with other tables in the from clause
-                            Some(Rc::new(LQPNode { output: None, inputs: [Some(Rc::new(table_node)), Some(prev_node)], expressions: Vec::new(), data: LQPNodeData::Join(JoinMode::Cross) }))
+                            Some(lqp.add_node(LQPNode { output: None, inputs: [Some(table_node), Some(prev_node)], expressions: Vec::new(), data: LQPNodeData::Join(JoinMode::Cross) }))
                         },
                         None => {
-                            Some(Rc::new(table_node))
+                            Some(table_node)
                         }
                     }
                 },
