@@ -87,7 +87,13 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
     // send AuthenticationOk
     send_protocol_message(&mut stream, 'R', &(0 as u32).to_be_bytes()).unwrap();
     // send ParameterStatus
-    send_protocol_message(&mut stream, 'S', "client_encoding\0WIN1252\0".as_bytes()).unwrap();
+    if let Some(enc) = parameters.get("client_encoding") {
+        let mut msg = Vec::new();
+        msg.extend("client_encoding\0".as_bytes());
+        msg.extend(enc.as_bytes());
+        msg.push(0);
+        send_protocol_message(&mut stream, 'S', msg.as_slice()).unwrap();
+    }
     // send BackendKeyData
     send_protocol_message(&mut stream, 'K', "abcdefgh".as_bytes()).unwrap();
     // send ReadyForQuery
