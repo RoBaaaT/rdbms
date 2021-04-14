@@ -1,5 +1,4 @@
 use std::fmt;
-use std::rc::*;
 use sqlparser::ast::*;
 
 // logical query plan nodes
@@ -190,7 +189,7 @@ impl LQPNode {
         }
 
         let mut from = LQPNode::from_from(&select.from, lqp)?;
-        if let Some(selection) = &select.selection {
+        if let Some(_selection) = &select.selection {
             // TODO: filter expressions
             let new_from = lqp.add_node(LQPNode { output: None, inputs: [Some(from), None], expressions: Vec::new(), data: LQPNodeData::Filter });
             lqp.set_output(from, new_from);
