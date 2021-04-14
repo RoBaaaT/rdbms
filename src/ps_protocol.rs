@@ -108,6 +108,38 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
         stream.read_exact(message_content.as_mut_slice()).unwrap();
         let message_type = type_buffer[0] as char;
         match message_type {
+            'P' => { // parse
+                let (prepared_statement, ps_bytes) = read_string(&message_content).unwrap();
+                if prepared_statement.len() > 0 {
+                    // TODO: prepared statement support
+                    send_error_response(&mut stream, ErrorSeverity::Error, String::from("42000"), String::from("Unsupported"), Some(String::from("Named prepared statements are not yet supported")), None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+                    continue;
+                }
+                let (query_string, q_bytes) = read_string(&message_content[ps_bytes..message_len]).unwrap();
+                // parameter data types
+                let offset = ps_bytes + q_bytes;
+                let pdt_count = u16::from_be_bytes(message_content[offset..offset + 2].try_into().unwrap());
+                println!("P: {}, Q: {}", prepared_statement, query_string);
+                if pdt_count > 0 {
+                    // TODO: parameter support
+                    send_error_response(&mut stream, ErrorSeverity::Error, String::from("42000"), String::from("Unsupported"), Some(String::from("Parameters are not yet supported")), None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+                    continue;
+                }
+                // TODO: parse and store as prepared statement
+                send_protocol_message(&mut stream, '1', &[]).unwrap();
+            },
+            'B' => { // bind
+                // TODO
+            },
+            'D' => { // describe
+                // TODO: respond with a ParameterDescription message
+            },
+            'E' => { // execute
+                // TODO
+            },
+            'S' => { // sync
+                // TODO
+            },
             'Q' => {
                 let db = db.read().unwrap();
                 // for now just use a new TransactionContext for each incoming query message
@@ -115,10 +147,7 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
                 let transaction_context = db.transaction_manager.lock().unwrap().new_transaction_context();
 
                 // get the query string
-                let query_string = match str::from_utf8(&message_content[0..message_len - 1]) {
-                    Ok(v) => v,
-                    Err(e) => panic!("Invalid UTF-8 sequence: {}", e),
-                };
+                let (query_string, _) = read_string(&message_content).unwrap();
                 let dialect = GenericDialect {};
                 match Parser::parse_sql(&dialect, query_string) {
                     Ok(statements) => {
@@ -216,6 +245,25 @@ impl fmt::Display for ErrorSeverity {
             ErrorSeverity::Fatal =>  write!(f, "FATAL"),
             ErrorSeverity::Panic =>  write!(f, "PANIC")
         }
+    }
+}
+
+// Err(true) indicates UTF-8 error, Err(false) indicates no string was found in buf
+fn read_string(buf: &[u8]) -> Result<(&str, usize), bool> {
+    let mut len = None;
+    for i in 0..buf.len() {
+        if buf[i] == 0 {
+            len = Some(i);
+            break;
+        }
+    }
+    if let Some(len) = len {
+        match str::from_utf8(&buf[0..len]) {
+            Ok(result) => Ok((result, len + 1)),
+            Err(_) => Err(true),
+        }
+    } else {
+        Err(false)
     }
 }
 
