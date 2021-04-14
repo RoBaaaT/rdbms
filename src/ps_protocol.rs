@@ -112,7 +112,7 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
                 let (prepared_statement, ps_bytes) = read_string(&message_content).unwrap();
                 if prepared_statement.len() > 0 {
                     // TODO: prepared statement support
-                    send_error_response(&mut stream, ErrorSeverity::Error, String::from("42000"), String::from("Unsupported"), Some(String::from("Named prepared statements are not yet supported")), None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+                    send_error_response(&mut stream, ProtocolError::with_detail(ErrorSeverity::Error, String::from("42000"), String::from("Unsupported"), String::from("Named prepared statements are not yet supported"))).unwrap();
                     continue;
                 }
                 let (query_string, q_bytes) = read_string(&message_content[ps_bytes..message_len]).unwrap();
@@ -122,7 +122,7 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
                 println!("P: {}, Q: {}", prepared_statement, query_string);
                 if pdt_count > 0 {
                     // TODO: parameter support
-                    send_error_response(&mut stream, ErrorSeverity::Error, String::from("42000"), String::from("Unsupported"), Some(String::from("Parameters are not yet supported")), None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+                    send_error_response(&mut stream, ProtocolError::with_detail(ErrorSeverity::Error, String::from("42000"), String::from("Unsupported"), String::from("Parameters are not yet supported"))).unwrap();
                     continue;
                 }
                 // TODO: parse and store as prepared statement
@@ -194,7 +194,7 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
                                 },
                                 Err(err) => {
                                     println!("LQP creation error: {:?}", err);
-                                    send_error_response(&mut stream, ErrorSeverity::Error, String::from("42000"), String::from("LQP error"), Some(err.to_string()), None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+                                    send_error_response(&mut stream, ProtocolError::with_detail(ErrorSeverity::Error, String::from("42000"), String::from("LQP error"), err.to_string())).unwrap();
                                 }
                             }
                         }
@@ -205,7 +205,7 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
                             ParserError::TokenizerError(message) => message,
                             ParserError::ParserError(message) => message
                         };
-                        send_error_response(&mut stream, ErrorSeverity::Error, String::from("42601"), String::from("Syntax error"), Some(message), None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+                        send_error_response(&mut stream, ProtocolError::with_detail(ErrorSeverity::Error, String::from("42601"), String::from("Syntax error"), message)).unwrap();
                     }
                 }
                 // ReadyForQuery
@@ -248,6 +248,50 @@ impl fmt::Display for ErrorSeverity {
     }
 }
 
+struct ProtocolError {
+    severity: ErrorSeverity,
+    sqlstate: String,
+    message: String,
+    detail: Option<String>,
+    hint: Option<String>,
+    position: Option<usize>,
+    internal_position: Option<usize>,
+    internal_query: Option<String>,
+    r#where: Option<String>,
+    schema: Option<String>,
+    table: Option<String>,
+    column: Option<String>,
+    data_type: Option<String>,
+    constraint: Option<String>,
+    file: Option<String>,
+    line: Option<String>,
+    routine: Option<String>
+}
+
+impl ProtocolError {
+    fn with_detail(severity: ErrorSeverity, sqlstate: String, message: String, detail: String) -> Self {
+        ProtocolError {
+            severity,
+            sqlstate,
+            message,
+            detail: Some(detail),
+            hint: None,
+            position: None,
+            internal_position: None,
+            internal_query: None,
+            r#where: None,
+            schema: None,
+            table: None,
+            column: None,
+            data_type: None,
+            constraint: None,
+            file: None,
+            line: None,
+            routine: None
+        }
+    }
+}
+
 // Err(true) indicates UTF-8 error, Err(false) indicates no string was found in buf
 fn read_string(buf: &[u8]) -> Result<(&str, usize), bool> {
     let mut len = None;
@@ -267,86 +311,86 @@ fn read_string(buf: &[u8]) -> Result<(&str, usize), bool> {
     }
 }
 
-fn send_error_response(stream: &mut TcpStream, severity: ErrorSeverity, sqlstate: String, message: String, detail: Option<String>, hint: Option<String>, position: Option<usize>, internal_position: Option<usize>, internal_query: Option<String>, r#where: Option<String>, schema: Option<String>, table: Option<String>, column: Option<String>, data_type: Option<String>, constraint: Option<String>, file: Option<String>, line: Option<String>, routine: Option<String>) -> io::Result<usize> {
+fn send_error_response(stream: &mut TcpStream, err: ProtocolError) -> io::Result<usize> {
     let mut buf = Vec::<u8>::new();
     buf.push('S' as u8);
-    buf.extend_from_slice(severity.to_string().as_bytes());
+    buf.extend_from_slice(err.severity.to_string().as_bytes());
     buf.push(0);
     buf.push('V' as u8);
-    buf.extend_from_slice(severity.to_string().as_bytes());
+    buf.extend_from_slice(err.severity.to_string().as_bytes());
     buf.push(0);
     buf.push('C' as u8);
-    buf.extend_from_slice(sqlstate.as_bytes());
+    buf.extend_from_slice(err.sqlstate.as_bytes());
     buf.push(0);
     buf.push('M' as u8);
-    buf.extend_from_slice(message.as_bytes());
+    buf.extend_from_slice(err.message.as_bytes());
     buf.push(0);
-    if let Some(detail) = detail {
+    if let Some(detail) = err.detail {
         buf.push('D' as u8);
         buf.extend_from_slice(detail.as_bytes());
         buf.push(0);
     }
-    if let Some(hint) = hint {
+    if let Some(hint) = err.hint {
         buf.push('H' as u8);
         buf.extend_from_slice(hint.as_bytes());
         buf.push(0);
     }
-    if let Some(position) = position {
+    if let Some(position) = err.position {
         buf.push('P' as u8);
         buf.extend_from_slice(position.to_string().as_bytes());
         buf.push(0);
     }
-    if let Some(internal_position) = internal_position {
+    if let Some(internal_position) = err.internal_position {
         buf.push('p' as u8);
         buf.extend_from_slice(internal_position.to_string().as_bytes());
         buf.push(0);
     }
-    if let Some(internal_query) = internal_query {
+    if let Some(internal_query) = err.internal_query {
         buf.push('D' as u8);
         buf.extend_from_slice(internal_query.as_bytes());
         buf.push(0);
     }
-    if let Some(r#where) = r#where {
+    if let Some(r#where) = err.r#where {
         buf.push('W' as u8);
         buf.extend_from_slice(r#where.as_bytes());
         buf.push(0);
     }
-    if let Some(schema) = schema {
+    if let Some(schema) = err.schema {
         buf.push('s' as u8);
         buf.extend_from_slice(schema.as_bytes());
         buf.push(0);
     }
-    if let Some(table) = table {
+    if let Some(table) = err.table {
         buf.push('t' as u8);
         buf.extend_from_slice(table.as_bytes());
         buf.push(0);
     }
-    if let Some(column) = column {
+    if let Some(column) = err.column {
         buf.push('c' as u8);
         buf.extend_from_slice(column.as_bytes());
         buf.push(0);
     }
-    if let Some(data_type) = data_type {
+    if let Some(data_type) = err.data_type {
         buf.push('d' as u8);
         buf.extend_from_slice(data_type.as_bytes());
         buf.push(0);
     }
-    if let Some(constraint) = constraint {
+    if let Some(constraint) = err.constraint {
         buf.push('n' as u8);
         buf.extend_from_slice(constraint.as_bytes());
         buf.push(0);
     }
-    if let Some(file) = file {
+    if let Some(file) = err.file {
         buf.push('F' as u8);
         buf.extend_from_slice(file.as_bytes());
         buf.push(0);
     }
-    if let Some(line) = line {
+    if let Some(line) = err.line {
         buf.push('L' as u8);
         buf.extend_from_slice(line.as_bytes());
         buf.push(0);
     }
-    if let Some(routine) = routine {
+    if let Some(routine) = err.routine {
         buf.push('R' as u8);
         buf.extend_from_slice(routine.as_bytes());
         buf.push(0);
