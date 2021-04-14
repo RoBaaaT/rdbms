@@ -99,6 +99,9 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
     // send ReadyForQuery
     send_protocol_message(&mut stream, 'Z', &['I' as u8]).unwrap();
 
+    // this is set to true if an error was encountered while processing the extended query flow (parse/bind/describe/execute/sync)
+    //  if set to true, incoming messages are discarded until the next sync message is encountered
+    let mut error_state = false;
     loop {
         let mut type_buffer = [0; 1];
         stream.read_exact(&mut type_buffer).unwrap();
@@ -109,10 +112,14 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
         let message_type = type_buffer[0] as char;
         match message_type {
             'P' => { // parse
+                if error_state {
+                    continue;
+                }
                 let (prepared_statement, ps_bytes) = read_string(&message_content).unwrap();
                 if prepared_statement.len() > 0 {
                     // TODO: prepared statement support
                     send_error_response(&mut stream, ProtocolError::with_detail(ErrorSeverity::Error, String::from("42000"), String::from("Unsupported"), String::from("Named prepared statements are not yet supported"))).unwrap();
+                    error_state = true;
                     continue;
                 }
                 let (query_string, q_bytes) = read_string(&message_content[ps_bytes..message_len]).unwrap();
@@ -123,6 +130,7 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
                 if pdt_count > 0 {
                     // TODO: parameter support
                     send_error_response(&mut stream, ProtocolError::with_detail(ErrorSeverity::Error, String::from("42000"), String::from("Unsupported"), String::from("Parameters are not yet supported"))).unwrap();
+                    error_state = true;
                     continue;
                 }
                 // TODO: parse and store as prepared statement
@@ -130,16 +138,36 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
                 send_protocol_message(&mut stream, '1', &[]).unwrap();
             },
             'B' => { // bind
-                // TODO
+                if error_state {
+                    continue;
+                }
+                // TODO: handle message contents
+                // BindComplete
+                send_protocol_message(&mut stream, '2', &[]).unwrap();
             },
             'D' => { // describe
-                // TODO: respond with a ParameterDescription message
+                if error_state {
+                    continue;
+                }
+                // TODO: respond with a proper ParameterDescription message
+                // ParameterDescription (0 parameters)
+                send_protocol_message(&mut stream, 't', &(0 as u16).to_be_bytes()).unwrap();
             },
             'E' => { // execute
-                // TODO
+                if error_state {
+                    continue;
+                }
+                let (prepared_statement, ps_bytes) = read_string(&message_content).unwrap();
+                let max_rows = u32::from_be_bytes(message_content[ps_bytes..ps_bytes + 4].try_into().unwrap()) as usize;
+                println!("Execute: '{}' (max {} rows)", prepared_statement, max_rows);
+                // TODO: handle execute
             },
             'S' => { // sync
-                // TODO
+                // TODO: handle transaction commit/abort
+                error_state = false;
+                // ReadyForQuery
+                send_protocol_message(&mut stream, 'Z', &['I' as u8]).unwrap();
+
             },
             'Q' => {
                 let db = db.read().unwrap();
