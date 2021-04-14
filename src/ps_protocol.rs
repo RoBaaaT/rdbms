@@ -13,7 +13,7 @@ use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::{Parser, ParserError};
 
 use crate::core::Database;
-use crate::lqp::LQP;
+use crate::lqp::{LQP, LQPError};
 
 pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
     let mut parameters = HashMap::new();
@@ -126,6 +126,7 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
                     continue;
                 }
                 // TODO: parse and store as prepared statement
+                // ParseComplete
                 send_protocol_message(&mut stream, '1', &[]).unwrap();
             },
             'B' => { // bind
@@ -144,7 +145,7 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
                 let db = db.read().unwrap();
                 // for now just use a new TransactionContext for each incoming query message
                 // TODO: proper handling of BEGIN/COMMIT/ROLLBACK/ABORT
-                let transaction_context = db.transaction_manager.lock().unwrap().new_transaction_context();
+                let _transaction_context = db.transaction_manager.lock().unwrap().new_transaction_context();
 
                 // get the query string
                 let (query_string, _) = read_string(&message_content).unwrap();
@@ -194,18 +195,14 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
                                 },
                                 Err(err) => {
                                     println!("LQP creation error: {:?}", err);
-                                    send_error_response(&mut stream, ProtocolError::with_detail(ErrorSeverity::Error, String::from("42000"), String::from("LQP error"), err.to_string())).unwrap();
+                                    send_error_response(&mut stream, ProtocolError::from(err)).unwrap();
                                 }
                             }
                         }
                     }
                     Err(err) => {
                         println!("Syntax error: {:?}", err);
-                        let message = match err {
-                            ParserError::TokenizerError(message) => message,
-                            ParserError::ParserError(message) => message
-                        };
-                        send_error_response(&mut stream, ProtocolError::with_detail(ErrorSeverity::Error, String::from("42601"), String::from("Syntax error"), message)).unwrap();
+                        send_error_response(&mut stream, ProtocolError::from(err)).unwrap();
                     }
                 }
                 // ReadyForQuery
@@ -232,6 +229,7 @@ fn send_protocol_message(stream: &mut TcpStream, message_type: char, buf: &[u8])
     return Ok(result);
 }
 
+#[allow(dead_code)]
 enum ErrorSeverity {
     Error,
     Fatal,
@@ -289,6 +287,22 @@ impl ProtocolError {
             line: None,
             routine: None
         }
+    }
+}
+
+impl From<ParserError> for ProtocolError {
+    fn from(err: ParserError) -> Self {
+        let message = match err {
+            ParserError::TokenizerError(message) => message,
+            ParserError::ParserError(message) => message
+        };
+        ProtocolError::with_detail(ErrorSeverity::Error, String::from("42601"), String::from("Syntax error"), message)
+    }
+}
+
+impl From<LQPError> for ProtocolError {
+    fn from(err: LQPError) -> Self {
+        ProtocolError::with_detail(ErrorSeverity::Error, String::from("42000"), String::from("LQP error"), err.to_string())
     }
 }
 

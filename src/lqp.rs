@@ -3,6 +3,7 @@ use sqlparser::ast::*;
 
 // logical query plan nodes
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum JoinMode {
     Inner,
