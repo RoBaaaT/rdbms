@@ -76,6 +76,7 @@ pub struct LQP {
     root_node: usize
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum LQPError {
     Generic,
@@ -192,19 +193,23 @@ impl LQPNode {
         let mut from = LQPNode::from_from(&select.from, lqp)?;
         if let Some(_selection) = &select.selection {
             // TODO: filter expressions
-            let new_from = lqp.add_node(LQPNode { output: None, inputs: [Some(from), None], expressions: Vec::new(), data: LQPNodeData::Filter });
-            lqp.set_output(from, new_from);
-            from = new_from;
+            let new_from = lqp.add_node(LQPNode { output: None, inputs: [from, None], expressions: Vec::new(), data: LQPNodeData::Filter });
+            if let Some(from) = from {
+                lqp.set_output(from, new_from);
+            }
+            from = Some(new_from);
         }
         // TODO: group by
         // TODO: having
         // TODO: projection expressions
-        let projection = lqp.add_node(LQPNode { output: None, inputs: [Some(from), None], expressions: Vec::new(), data: LQPNodeData::Projection });
-        lqp.set_output(from, projection);
+        let projection = lqp.add_node(LQPNode { output: None, inputs: [from, None], expressions: Vec::new(), data: LQPNodeData::Projection });
+        if let Some(from) = from {
+            lqp.set_output(from, projection);
+        }
         return Ok(projection);
     }
 
-    pub fn from_from(from: &Vec<TableWithJoins>, lqp: &mut LQP) -> Result<usize, LQPError> {
+    pub fn from_from(from: &Vec<TableWithJoins>, lqp: &mut LQP) -> Result<Option<usize>, LQPError> {
         let mut node = None;
         for twj in from.iter() {
             if twj.joins.len() > 0 {
@@ -229,11 +234,6 @@ impl LQPNode {
                 _ => return Err(LQPError::NotSupported("TableFactor!=Table"))
             }
         }
-        if let Some(result) = node {
-            Ok(result)
-        } else {
-            // parser should not allow this
-            Err(LQPError::ASTError("Missing FROM clause"))
-        }
+        Ok(node)
     }
 }
