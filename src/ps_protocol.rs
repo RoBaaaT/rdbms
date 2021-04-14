@@ -133,7 +133,43 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
                     error_state = true;
                     continue;
                 }
+
+                // parse
+                let dialect = GenericDialect {};
                 // TODO: parse and store as prepared statement
+                match Parser::parse_sql(&dialect, query_string) {
+                    Ok(statements) => {
+                        if statements.len() > 1 {
+                            send_error_response(&mut stream, ProtocolError::with_detail(ErrorSeverity::Error, String::from("42000"), String::from("Multiple SQL statements"), String::from("Only a single statement is supported in prepared statements"))).unwrap();
+                            error_state = true;
+                            continue;
+                        }
+                        if statements.len() == 0 {
+                            // TODO: handle this
+                        } else {
+                            let statement = &statements[0];
+                            println!("Parsed SQL: {:?}", statement);
+                            let lqp = LQP::from(&statement);
+                            match lqp {
+                                Ok(lqp) => {
+                                    println!("LQP: {:?}", lqp);
+                                    // TEMPORARY: write the LQP to file as a dot graph
+                                    let mut file = File::create("lqp.dot").unwrap();
+                                    file.write_all(lqp.get_dot_graph().as_bytes()).unwrap();
+                                    // TODO: ...
+                                },
+                                Err(err) => {
+                                    println!("LQP creation error: {:?}", err);
+                                    send_error_response(&mut stream, ProtocolError::from(err)).unwrap();
+                                }
+                            }
+                        }
+                    },
+                    Err(err) => {
+                        println!("Syntax error: {:?}", err);
+                        send_error_response(&mut stream, ProtocolError::from(err)).unwrap();
+                    }
+                };
                 // ParseComplete
                 send_protocol_message(&mut stream, '1', &[]).unwrap();
             },
@@ -161,6 +197,8 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
                 let max_rows = u32::from_be_bytes(message_content[ps_bytes..ps_bytes + 4].try_into().unwrap()) as usize;
                 println!("Execute: '{}' (max {} rows)", prepared_statement, max_rows);
                 // TODO: handle execute
+                // CommandComplete
+                send_protocol_message(&mut stream, 'C', "SELECT\0".as_bytes()).unwrap();
             },
             'S' => { // sync
                 // TODO: handle transaction commit/abort
