@@ -126,7 +126,7 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
                 // parameter data types
                 let offset = ps_bytes + q_bytes;
                 let pdt_count = u16::from_be_bytes(message_content[offset..offset + 2].try_into().unwrap());
-                println!("P: {}, Q: {}", prepared_statement, query_string);
+                println!("Prepared statement: '{}' => {}", prepared_statement, query_string);
                 if pdt_count > 0 {
                     // TODO: parameter support
                     send_error_response(&mut stream, ProtocolError::with_detail(ErrorSeverity::Error, String::from("42000"), String::from("Unsupported"), String::from("Parameters are not yet supported"))).unwrap();
