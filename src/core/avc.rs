@@ -1,4 +1,4 @@
-type ValueId = u32;
+pub type ValueId = u32;
 
 pub trait AttributeValueContainer<T> {
     fn lookup(&self, i: usize) -> Option<T>;
