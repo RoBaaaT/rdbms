@@ -13,7 +13,7 @@ use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::{Parser, ParserError};
 
 use crate::core::Database;
-use crate::lqp::LQP;
+use crate::lqp::{LQP, LQPError};
 
 pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
     let mut parameters = HashMap::new();
@@ -87,12 +87,21 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
     // send AuthenticationOk
     send_protocol_message(&mut stream, 'R', &(0 as u32).to_be_bytes()).unwrap();
     // send ParameterStatus
-    send_protocol_message(&mut stream, 'S', "client_encoding\0WIN1252\0".as_bytes()).unwrap();
+    if let Some(enc) = parameters.get("client_encoding") {
+        let mut msg = Vec::new();
+        msg.extend("client_encoding\0".as_bytes());
+        msg.extend(enc.as_bytes());
+        msg.push(0);
+        send_protocol_message(&mut stream, 'S', msg.as_slice()).unwrap();
+    }
     // send BackendKeyData
     send_protocol_message(&mut stream, 'K', "abcdefgh".as_bytes()).unwrap();
     // send ReadyForQuery
     send_protocol_message(&mut stream, 'Z', &['I' as u8]).unwrap();
 
+    // this is set to true if an error was encountered while processing the extended query flow (parse/bind/describe/execute/sync)
+    //  if set to true, incoming messages are discarded until the next sync message is encountered
+    let mut error_state = false;
     loop {
         let mut type_buffer = [0; 1];
         stream.read_exact(&mut type_buffer).unwrap();
@@ -102,17 +111,110 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
         stream.read_exact(message_content.as_mut_slice()).unwrap();
         let message_type = type_buffer[0] as char;
         match message_type {
+            'P' => { // parse
+                if error_state {
+                    continue;
+                }
+                let (prepared_statement, ps_bytes) = read_string(&message_content).unwrap();
+                if prepared_statement.len() > 0 {
+                    // TODO: prepared statement support
+                    send_error_response(&mut stream, ProtocolError::with_detail(ErrorSeverity::Error, String::from("42000"), String::from("Unsupported"), String::from("Named prepared statements are not yet supported"))).unwrap();
+                    error_state = true;
+                    continue;
+                }
+                let (query_string, q_bytes) = read_string(&message_content[ps_bytes..message_len]).unwrap();
+                // parameter data types
+                let offset = ps_bytes + q_bytes;
+                let pdt_count = u16::from_be_bytes(message_content[offset..offset + 2].try_into().unwrap());
+                println!("Prepared statement: '{}' => {}", prepared_statement, query_string);
+                if pdt_count > 0 {
+                    // TODO: parameter support
+                    send_error_response(&mut stream, ProtocolError::with_detail(ErrorSeverity::Error, String::from("42000"), String::from("Unsupported"), String::from("Parameters are not yet supported"))).unwrap();
+                    error_state = true;
+                    continue;
+                }
+
+                // parse
+                let dialect = GenericDialect {};
+                // TODO: parse and store as prepared statement
+                match Parser::parse_sql(&dialect, query_string) {
+                    Ok(statements) => {
+                        if statements.len() > 1 {
+                            send_error_response(&mut stream, ProtocolError::with_detail(ErrorSeverity::Error, String::from("42000"), String::from("Multiple SQL statements"), String::from("Only a single statement is supported in prepared statements"))).unwrap();
+                            error_state = true;
+                            continue;
+                        }
+                        if statements.len() == 0 {
+                            // TODO: handle this
+                        } else {
+                            let statement = &statements[0];
+                            println!("Parsed SQL: {:?}", statement);
+                            let lqp = LQP::from(&statement);
+                            match lqp {
+                                Ok(lqp) => {
+                                    println!("LQP: {:?}", lqp);
+                                    // TEMPORARY: write the LQP to file as a dot graph
+                                    let mut file = File::create("lqp.dot").unwrap();
+                                    file.write_all(lqp.get_dot_graph().as_bytes()).unwrap();
+                                    // TODO: ...
+                                },
+                                Err(err) => {
+                                    println!("LQP creation error: {:?}", err);
+                                    send_error_response(&mut stream, ProtocolError::from(err)).unwrap();
+                                }
+                            }
+                        }
+                    },
+                    Err(err) => {
+                        println!("Syntax error: {:?}", err);
+                        send_error_response(&mut stream, ProtocolError::from(err)).unwrap();
+                    }
+                };
+                // ParseComplete
+                send_protocol_message(&mut stream, '1', &[]).unwrap();
+            },
+            'B' => { // bind
+                if error_state {
+                    continue;
+                }
+                // TODO: handle message contents
+                // BindComplete
+                send_protocol_message(&mut stream, '2', &[]).unwrap();
+            },
+            'D' => { // describe
+                if error_state {
+                    continue;
+                }
+                // TODO: respond with a proper ParameterDescription message
+                // ParameterDescription (0 parameters)
+                send_protocol_message(&mut stream, 't', &(0 as u16).to_be_bytes()).unwrap();
+            },
+            'E' => { // execute
+                if error_state {
+                    continue;
+                }
+                let (prepared_statement, ps_bytes) = read_string(&message_content).unwrap();
+                let max_rows = u32::from_be_bytes(message_content[ps_bytes..ps_bytes + 4].try_into().unwrap()) as usize;
+                println!("Execute: '{}' (max {} rows)", prepared_statement, max_rows);
+                // TODO: handle execute
+                // CommandComplete
+                send_protocol_message(&mut stream, 'C', "SELECT\0".as_bytes()).unwrap();
+            },
+            'S' => { // sync
+                // TODO: handle transaction commit/abort
+                error_state = false;
+                // ReadyForQuery
+                send_protocol_message(&mut stream, 'Z', &['I' as u8]).unwrap();
+
+            },
             'Q' => {
                 let db = db.read().unwrap();
                 // for now just use a new TransactionContext for each incoming query message
                 // TODO: proper handling of BEGIN/COMMIT/ROLLBACK/ABORT
-                let transaction_context = db.transaction_manager.lock().unwrap().new_transaction_context();
+                let _transaction_context = db.transaction_manager.lock().unwrap().new_transaction_context();
 
                 // get the query string
-                let query_string = match str::from_utf8(&message_content[0..message_len - 1]) {
-                    Ok(v) => v,
-                    Err(e) => panic!("Invalid UTF-8 sequence: {}", e),
-                };
+                let (query_string, _) = read_string(&message_content).unwrap();
                 let dialect = GenericDialect {};
                 match Parser::parse_sql(&dialect, query_string) {
                     Ok(statements) => {
@@ -159,18 +261,14 @@ pub fn handle_connection(mut stream: TcpStream, db: Arc<RwLock<Database>>) {
                                 },
                                 Err(err) => {
                                     println!("LQP creation error: {:?}", err);
-                                    send_error_response(&mut stream, ErrorSeverity::Error, String::from("42000"), String::from("LQP error"), Some(err.to_string()), None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+                                    send_error_response(&mut stream, ProtocolError::from(err)).unwrap();
                                 }
                             }
                         }
                     }
                     Err(err) => {
                         println!("Syntax error: {:?}", err);
-                        let message = match err {
-                            ParserError::TokenizerError(message) => message,
-                            ParserError::ParserError(message) => message
-                        };
-                        send_error_response(&mut stream, ErrorSeverity::Error, String::from("42601"), String::from("Syntax error"), Some(message), None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+                        send_error_response(&mut stream, ProtocolError::from(err)).unwrap();
                     }
                 }
                 // ReadyForQuery
@@ -197,6 +295,7 @@ fn send_protocol_message(stream: &mut TcpStream, message_type: char, buf: &[u8])
     return Ok(result);
 }
 
+#[allow(dead_code)]
 enum ErrorSeverity {
     Error,
     Fatal,
@@ -213,86 +312,165 @@ impl fmt::Display for ErrorSeverity {
     }
 }
 
-fn send_error_response(stream: &mut TcpStream, severity: ErrorSeverity, sqlstate: String, message: String, detail: Option<String>, hint: Option<String>, position: Option<usize>, internal_position: Option<usize>, internal_query: Option<String>, r#where: Option<String>, schema: Option<String>, table: Option<String>, column: Option<String>, data_type: Option<String>, constraint: Option<String>, file: Option<String>, line: Option<String>, routine: Option<String>) -> io::Result<usize> {
+struct ProtocolError {
+    severity: ErrorSeverity,
+    sqlstate: String,
+    message: String,
+    detail: Option<String>,
+    hint: Option<String>,
+    position: Option<usize>,
+    internal_position: Option<usize>,
+    internal_query: Option<String>,
+    r#where: Option<String>,
+    schema: Option<String>,
+    table: Option<String>,
+    column: Option<String>,
+    data_type: Option<String>,
+    constraint: Option<String>,
+    file: Option<String>,
+    line: Option<String>,
+    routine: Option<String>
+}
+
+impl ProtocolError {
+    fn with_detail(severity: ErrorSeverity, sqlstate: String, message: String, detail: String) -> Self {
+        ProtocolError {
+            severity,
+            sqlstate,
+            message,
+            detail: Some(detail),
+            hint: None,
+            position: None,
+            internal_position: None,
+            internal_query: None,
+            r#where: None,
+            schema: None,
+            table: None,
+            column: None,
+            data_type: None,
+            constraint: None,
+            file: None,
+            line: None,
+            routine: None
+        }
+    }
+}
+
+impl From<ParserError> for ProtocolError {
+    fn from(err: ParserError) -> Self {
+        let message = match err {
+            ParserError::TokenizerError(message) => message,
+            ParserError::ParserError(message) => message
+        };
+        ProtocolError::with_detail(ErrorSeverity::Error, String::from("42601"), String::from("Syntax error"), message)
+    }
+}
+
+impl From<LQPError> for ProtocolError {
+    fn from(err: LQPError) -> Self {
+        ProtocolError::with_detail(ErrorSeverity::Error, String::from("42000"), String::from("LQP error"), err.to_string())
+    }
+}
+
+// Err(true) indicates UTF-8 error, Err(false) indicates no string was found in buf
+fn read_string(buf: &[u8]) -> Result<(&str, usize), bool> {
+    let mut len = None;
+    for i in 0..buf.len() {
+        if buf[i] == 0 {
+            len = Some(i);
+            break;
+        }
+    }
+    if let Some(len) = len {
+        match str::from_utf8(&buf[0..len]) {
+            Ok(result) => Ok((result, len + 1)),
+            Err(_) => Err(true),
+        }
+    } else {
+        Err(false)
+    }
+}
+
+fn send_error_response(stream: &mut TcpStream, err: ProtocolError) -> io::Result<usize> {
     let mut buf = Vec::<u8>::new();
     buf.push('S' as u8);
-    buf.extend_from_slice(severity.to_string().as_bytes());
+    buf.extend_from_slice(err.severity.to_string().as_bytes());
     buf.push(0);
     buf.push('V' as u8);
-    buf.extend_from_slice(severity.to_string().as_bytes());
+    buf.extend_from_slice(err.severity.to_string().as_bytes());
     buf.push(0);
     buf.push('C' as u8);
-    buf.extend_from_slice(sqlstate.as_bytes());
+    buf.extend_from_slice(err.sqlstate.as_bytes());
     buf.push(0);
     buf.push('M' as u8);
-    buf.extend_from_slice(message.as_bytes());
+    buf.extend_from_slice(err.message.as_bytes());
     buf.push(0);
-    if let Some(detail) = detail {
+    if let Some(detail) = err.detail {
         buf.push('D' as u8);
         buf.extend_from_slice(detail.as_bytes());
         buf.push(0);
     }
-    if let Some(hint) = hint {
+    if let Some(hint) = err.hint {
         buf.push('H' as u8);
         buf.extend_from_slice(hint.as_bytes());
         buf.push(0);
     }
-    if let Some(position) = position {
+    if let Some(position) = err.position {
         buf.push('P' as u8);
         buf.extend_from_slice(position.to_string().as_bytes());
         buf.push(0);
     }
-    if let Some(internal_position) = internal_position {
+    if let Some(internal_position) = err.internal_position {
         buf.push('p' as u8);
         buf.extend_from_slice(internal_position.to_string().as_bytes());
         buf.push(0);
     }
-    if let Some(internal_query) = internal_query {
+    if let Some(internal_query) = err.internal_query {
         buf.push('D' as u8);
         buf.extend_from_slice(internal_query.as_bytes());
         buf.push(0);
     }
-    if let Some(r#where) = r#where {
+    if let Some(r#where) = err.r#where {
         buf.push('W' as u8);
         buf.extend_from_slice(r#where.as_bytes());
         buf.push(0);
     }
-    if let Some(schema) = schema {
+    if let Some(schema) = err.schema {
         buf.push('s' as u8);
         buf.extend_from_slice(schema.as_bytes());
         buf.push(0);
     }
-    if let Some(table) = table {
+    if let Some(table) = err.table {
         buf.push('t' as u8);
         buf.extend_from_slice(table.as_bytes());
         buf.push(0);
     }
-    if let Some(column) = column {
+    if let Some(column) = err.column {
         buf.push('c' as u8);
         buf.extend_from_slice(column.as_bytes());
         buf.push(0);
     }
-    if let Some(data_type) = data_type {
+    if let Some(data_type) = err.data_type {
         buf.push('d' as u8);
         buf.extend_from_slice(data_type.as_bytes());
         buf.push(0);
     }
-    if let Some(constraint) = constraint {
+    if let Some(constraint) = err.constraint {
         buf.push('n' as u8);
         buf.extend_from_slice(constraint.as_bytes());
         buf.push(0);
     }
-    if let Some(file) = file {
+    if let Some(file) = err.file {
         buf.push('F' as u8);
         buf.extend_from_slice(file.as_bytes());
         buf.push(0);
     }
-    if let Some(line) = line {
+    if let Some(line) = err.line {
         buf.push('L' as u8);
         buf.extend_from_slice(line.as_bytes());
         buf.push(0);
     }
-    if let Some(routine) = routine {
+    if let Some(routine) = err.routine {
         buf.push('R' as u8);
         buf.extend_from_slice(routine.as_bytes());
         buf.push(0);

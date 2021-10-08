@@ -1,9 +1,9 @@
 use std::fmt;
-use std::rc::*;
 use sqlparser::ast::*;
 
 // logical query plan nodes
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum JoinMode {
     Inner,
@@ -56,15 +56,51 @@ LQP NODE types in hyrise:
   Mock
 */
 
+#[allow(dead_code)]
+#[derive(Debug)]
+pub enum FunctionType {
+    CurrentSchema,
+    SessionUser
+}
+
+#[derive(Debug)]
+pub enum LQPExpressionData {
+    Function(FunctionType)
+}
+
+/*
+Expression types in Hyrise, but missing here:
+  Aggregate,
+  Arithmetic,
+  Cast,
+  Case,
+  CorrelatedParameter,
+  PQPColumn,
+  LQPColumn,
+  Exists,
+  Extract,
+  List,
+  Logical,
+  Placeholder,
+  Predicate,
+  PQPSubquery,
+  LQPSubquery,
+  UnaryMinus,
+  Value
+*/
+
 #[derive(Debug)]
 pub struct LQPExpression {
-
+    // point into the expression vector of the parent LQP
+    pub arguments: Vec<usize>,
+    pub data: LQPExpressionData
 }
 
 #[derive(Debug)]
 pub struct LQPNode {
     pub output: Option<usize>,
     pub inputs: [Option<usize>; 2],
+    // point into the expression vector of the parent LQP
     pub expressions: Vec<usize>,
     pub data: LQPNodeData
 }
@@ -76,6 +112,7 @@ pub struct LQP {
     root_node: usize
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum LQPError {
     Generic,
@@ -89,6 +126,16 @@ impl fmt::Display for LQPError {
             LQPError::Generic => write!(f, "Generic"),
             LQPError::NotSupported(msg) =>  write!(f, "Not supported: {}", msg),
             LQPError::ASTError(msg) =>  write!(f, "AST Error: {}", msg)
+        }
+    }
+}
+
+impl LQPExpression {
+    fn get_dot_str(&self, _expressions: &Vec<LQPExpression>) -> String {
+        match &self.data {
+            LQPExpressionData::Function(func) => {
+                format!("{:?}()", func)
+            }
         }
     }
 }
@@ -110,7 +157,7 @@ impl LQP {
 
     pub fn create_dot_plan_nodes_and_edges(&self, id: usize, nodes: &mut String, edges: &mut String) {
         let node = &self.nodes[id];
-        nodes.push_str(&node.get_dot_node(id));
+        nodes.push_str(&node.get_dot_node(id, &self.expressions));
         if let Some(left) = node.inputs[0] {
             edges.push_str(&format!("plannode_{}->plannode_{}\n", id, left));
             self.create_dot_plan_nodes_and_edges(left, nodes, edges);
@@ -126,17 +173,37 @@ impl LQP {
         self.nodes.len() - 1
     }
 
+    pub fn add_expression(&mut self, expression: LQPExpression) -> usize {
+        self.expressions.push(expression);
+        self.expressions.len() - 1
+    }
+
     pub fn set_output(&mut self, node_id: usize, output_node_id: usize) {
         self.nodes[node_id].output = Some(output_node_id)
     }
 }
 
 impl LQPNode {
-    pub fn get_dot_node(&self, id: usize) -> String {
-        match &self.data {
-            LQPNodeData::Table { table_name, .. } => format!("plannode_{}[label=\"{{Table [{}]}}\", style=\"rounded\", shape=record];\n", id, table_name),
-            _ => format!("plannode_{}[label=\"{{{:?}}}\", style=\"rounded\", shape=record];\n", id, self.data)
-        }
+    pub fn get_dot_node(&self, id: usize, expressions: &Vec<LQPExpression>) -> String {
+        let label = match &self.data {
+            LQPNodeData::Table { table_name, .. } => format!("Table [{}]", table_name),
+            _ => format!("{:?}", self.data)
+        };
+        let expressions = if self.expressions.len() == 0 {
+            String::new()
+        } else {
+            let mut result = "|".to_owned();
+            for (i, expr) in self.expressions.iter().enumerate() {
+                let expr_str = expressions[*expr].get_dot_str(&expressions);
+                if i == 0 {
+                    result = format!("{}{}", result, expr_str);
+                } else {
+                    result = format!("{}, {}", result, expr_str);
+                }
+            }
+            result
+        };
+        format!("plannode_{}[label=\"{{{}{}}}\", style=\"rounded\", shape=record];\n", id, label, expressions)
     }
 
     pub fn from(sql_statement: &Statement, lqp: &mut LQP) -> Result<usize, LQPError> {
@@ -190,21 +257,56 @@ impl LQPNode {
         }
 
         let mut from = LQPNode::from_from(&select.from, lqp)?;
-        if let Some(selection) = &select.selection {
+        if let Some(_selection) = &select.selection {
             // TODO: filter expressions
-            let new_from = lqp.add_node(LQPNode { output: None, inputs: [Some(from), None], expressions: Vec::new(), data: LQPNodeData::Filter });
-            lqp.set_output(from, new_from);
-            from = new_from;
+            let new_from = lqp.add_node(LQPNode { output: None, inputs: [from, None], expressions: Vec::new(), data: LQPNodeData::Filter });
+            if let Some(from) = from {
+                lqp.set_output(from, new_from);
+            }
+            from = Some(new_from);
         }
         // TODO: group by
         // TODO: having
-        // TODO: projection expressions
-        let projection = lqp.add_node(LQPNode { output: None, inputs: [Some(from), None], expressions: Vec::new(), data: LQPNodeData::Projection });
-        lqp.set_output(from, projection);
+        let mut projection_expressions = Vec::new();
+        for expression in &select.projection {
+            match expression {
+                SelectItem::UnnamedExpr(expr) => {
+                    match expr {
+                        Expr::Identifier(ident) => { // in this context, a column or session information (see https://www.postgresql.org/docs/9.1/functions-info.html)
+                            match ident.value.as_str() {
+                                "session_user" => {
+                                    projection_expressions.push(lqp.add_expression(LQPExpression { arguments: Vec::new(), data: LQPExpressionData::Function(FunctionType::SessionUser) }))
+                                },
+                                _ => return Err(LQPError::NotSupported("Column expressions are not yet supported"))
+                            }
+                        },
+                        Expr::Function(func) => {
+                            if func.name.0.len() > 1 {
+                                return Err(LQPError::NotSupported("Multipart function names are not supported"))
+                            } else {
+                                match func.name.0[0].value.as_str() {
+                                    "current_schema" => {
+                                        projection_expressions.push(lqp.add_expression(LQPExpression { arguments: Vec::new(), data: LQPExpressionData::Function(FunctionType::CurrentSchema) }))
+                                    },
+                                    _ => return Err(LQPError::NotSupported("Unsupported function name"))
+                                }
+                            }
+                        },
+                        _ => return Err(LQPError::NotSupported("Unsupported expression type"))
+                    }
+                },
+                // TODO: support aliased expressions and wildcards
+                _ => return Err(LQPError::NotSupported("SelectItem != UnnamedExpr"))
+            }
+        }
+        let projection = lqp.add_node(LQPNode { output: None, inputs: [from, None], expressions: projection_expressions, data: LQPNodeData::Projection });
+        if let Some(from) = from {
+            lqp.set_output(from, projection);
+        }
         return Ok(projection);
     }
 
-    pub fn from_from(from: &Vec<TableWithJoins>, lqp: &mut LQP) -> Result<usize, LQPError> {
+    pub fn from_from(from: &Vec<TableWithJoins>, lqp: &mut LQP) -> Result<Option<usize>, LQPError> {
         let mut node = None;
         for twj in from.iter() {
             if twj.joins.len() > 0 {
@@ -229,11 +331,6 @@ impl LQPNode {
                 _ => return Err(LQPError::NotSupported("TableFactor!=Table"))
             }
         }
-        if let Some(result) = node {
-            Ok(result)
-        } else {
-            // parser should not allow this
-            Err(LQPError::ASTError("Missing FROM clause"))
-        }
+        Ok(node)
     }
 }
