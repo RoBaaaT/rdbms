@@ -3,6 +3,7 @@ pub type ValueId = u32;
 pub trait AttributeValueContainer<T> {
     fn lookup(&self, i: usize) -> Option<T>;
     fn len(&self) -> usize;
+    fn distinct_count(&self) -> usize;
     fn null_value_id(&self) -> ValueId;
 }
 
@@ -44,6 +45,10 @@ impl<T> AttributeValueContainer<T> for MainAttributeValueContainer<T> {
 
     fn len(&self) -> usize {
         self.data.len()
+    }
+
+    fn distinct_count(&self) -> usize {
+        self.dict.len()
     }
 
     fn null_value_id(&self) -> ValueId {

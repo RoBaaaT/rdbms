@@ -15,57 +15,18 @@ use std::fs::{self};
 use crate::ps_protocol::handle_connection;
 use crate::threadpool::ThreadPool;
 use crate::core::AttributeValueContainer;
+use crate::core::ValueId;
 use crate::transaction::TransactionManager;
-
-fn insert_into_sorted_vec(val: i64, vec: &mut Vec<i64>) {
-    let mut low = 0;
-    let mut high = vec.len();
-    while high != low {
-        let center = (low + high) / 2;
-        if center < vec.len() {
-            if vec[center] == val {
-                return;
-            } else if vec[center] < val {
-                low = center + 1;
-            } else {
-                high = center;
-            }
-        }
-    }
-    vec.insert(low, val);
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn insert_into_sorted_vec() {
-        let mut vec = Vec::new();
-        super::insert_into_sorted_vec(1, &mut vec);
-        assert_eq!(vec, vec![1]);
-        super::insert_into_sorted_vec(0, &mut vec);
-        assert_eq!(vec, vec![0, 1]);
-        super::insert_into_sorted_vec(0, &mut vec);
-        assert_eq!(vec, vec![0, 1]);
-        super::insert_into_sorted_vec(2, &mut vec);
-        assert_eq!(vec, vec![0, 1, 2]);
-    }
-}
 
 fn main() {
     // load TPC-H data
     //  NOTE: for now, only importing integer columns from LINEITEM as a first step
-    let mut dicts: HashMap<String, Vec<i64>> = HashMap::new();
-    dicts.insert(String::from("L_ORDERKEY"), Vec::new());
-    dicts.insert(String::from("L_PARTKEY"), Vec::new());
-    dicts.insert(String::from("L_SUPPKEY"), Vec::new());
-    dicts.insert(String::from("L_LINENUMBER"), Vec::new());
-    dicts.insert(String::from("L_QUANTITY"), Vec::new());
-    let mut dvs: HashMap<String, Vec<i32>> = HashMap::new();
-    dvs.insert(String::from("L_ORDERKEY"), Vec::new());
-    dvs.insert(String::from("L_PARTKEY"), Vec::new());
-    dvs.insert(String::from("L_SUPPKEY"), Vec::new());
-    dvs.insert(String::from("L_LINENUMBER"), Vec::new());
-    dvs.insert(String::from("L_QUANTITY"), Vec::new());
+    let mut columns: HashMap<String, Vec<i64>> = HashMap::new();
+    columns.insert(String::from("L_ORDERKEY"), Vec::new());
+    columns.insert(String::from("L_PARTKEY"), Vec::new());
+    columns.insert(String::from("L_SUPPKEY"), Vec::new());
+    columns.insert(String::from("L_LINENUMBER"), Vec::new());
+    columns.insert(String::from("L_QUANTITY"), Vec::new());
     for f in fs::read_dir("tpc-h/sf1").unwrap() {
         let f = f.unwrap();
         let path = f.path();
@@ -86,7 +47,7 @@ fn main() {
                             };
 
                             if let Some(col_name) = col {
-                                insert_into_sorted_vec(i64::from_str_radix(value, 10).unwrap(), dicts.get_mut(col_name).unwrap());
+                                columns.get_mut(col_name).unwrap().push(i64::from_str_radix(value, 10).unwrap());
                             }
                         }
                         if i % 100000 == 0 {
@@ -97,7 +58,27 @@ fn main() {
             }
         }
     }
-    println!("{:?}", dicts.get("L_QUANTITY").unwrap());
+
+    // domain encoding of columns
+    for (name, column) in columns.iter() {
+        let mut column_with_indices: Vec<(usize, i64)> = column.iter().enumerate().map(|(i, val)| (i, *val)).collect();
+        column_with_indices.sort_by_key(|(_i, val)| *val);
+        let mut dict = Vec::new();
+        let mut current: Option<i64> = None;
+        let mut dv: Vec<ValueId> = vec![0; column_with_indices.len()];
+        for (i, val) in column_with_indices.iter() {
+            if current == Some(*val) {
+                dv[*i] = (dict.len() - 1) as ValueId;
+            } else {
+                dict.push(*val);
+                current = Some(*val);
+                dv[*i] = (dict.len() - 1) as ValueId;
+            }
+        }
+        let avc = core::MainAttributeValueContainer::<i64> { data: dv, dict: Box::new(core::BigIntDict { entries: dict }) };
+        // print first 5 "rows"
+        println!("{:?}: {:?},{:?},{:?},{:?},{:?}", name, avc.lookup(0), avc.lookup(1), avc.lookup(2), avc.lookup(3), avc.lookup(4));
+    }
 
     let dict = Box::new(core::BigIntDict { entries: vec![1, 5, 7, 2311] });
     let mut avc = core::MainAttributeValueContainer::<i64> { data: Vec::new(), dict: dict };
