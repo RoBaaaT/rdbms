@@ -12,12 +12,12 @@ pub trait Dict<T> {
     fn len(&self) -> usize;
 }
 
-pub struct BigIntDict {
-    pub entries: Vec<i64>
+pub struct FixedSizeDict<T: Copy + PartialOrd + Sized + Send + Sync> {
+    pub entries: Vec<T>
 }
 
-impl Dict<i64> for BigIntDict {
-    fn lookup(&self, i: ValueId) -> i64 {
+impl<T: Copy + PartialOrd + Sized + Send + Sync> Dict<T> for FixedSizeDict<T> {
+    fn lookup(&self, i: ValueId) -> T {
         self.entries[i as usize]
     }
 

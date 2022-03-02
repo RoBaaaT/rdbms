@@ -10,6 +10,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
+use std::fmt::Debug;
 use std::fs::{self};
 
 use crate::ps_protocol::handle_connection;
@@ -18,15 +19,45 @@ use crate::core::AttributeValueContainer;
 use crate::core::ValueId;
 use crate::transaction::TransactionManager;
 
+enum RawColumn {
+    BigInt(Vec<i64>),
+    Date(Vec<i64>),
+    Double(Vec<f64>)
+}
+
+fn create_avc<T: 'static + Copy + PartialOrd + Sized + Send + Sync + Debug>(name: &String, column: &Vec<T>) {
+    let mut column_with_indices: Vec<(usize, T)> = column.iter().enumerate().map(|(i, val)| (i, *val)).collect();
+    column_with_indices.sort_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut dict = Vec::new();
+    let mut current: Option<T> = None;
+    let mut dv: Vec<ValueId> = vec![0; column_with_indices.len()];
+    for (i, val) in column_with_indices.iter() {
+        if current == Some(*val) {
+            dv[*i] = (dict.len() - 1) as ValueId;
+        } else {
+            dict.push(*val);
+            current = Some(*val);
+            dv[*i] = (dict.len() - 1) as ValueId;
+        }
+    }
+    let avc = core::MainAttributeValueContainer::<T> { data: dv, dict: Box::new(core::FixedSizeDict { entries: dict }) };
+    // print first 5 "rows"
+    // TODO: return avc instead
+    println!("{:?}: {:?},{:?},{:?},{:?},{:?}", name, avc.lookup(0), avc.lookup(1), avc.lookup(2), avc.lookup(3), avc.lookup(4));
+}
+
 fn main() {
     // load TPC-H data
     //  NOTE: for now, only importing integer columns from LINEITEM as a first step
-    let mut columns: HashMap<String, Vec<i64>> = HashMap::new();
-    columns.insert(String::from("L_ORDERKEY"), Vec::new());
-    columns.insert(String::from("L_PARTKEY"), Vec::new());
-    columns.insert(String::from("L_SUPPKEY"), Vec::new());
-    columns.insert(String::from("L_LINENUMBER"), Vec::new());
-    columns.insert(String::from("L_QUANTITY"), Vec::new());
+    let mut columns: HashMap<String, RawColumn> = HashMap::new();
+    columns.insert(String::from("L_ORDERKEY"), RawColumn::BigInt(Vec::new()));
+    columns.insert(String::from("L_PARTKEY"), RawColumn::BigInt(Vec::new()));
+    columns.insert(String::from("L_SUPPKEY"), RawColumn::BigInt(Vec::new()));
+    columns.insert(String::from("L_LINENUMBER"), RawColumn::BigInt(Vec::new()));
+    columns.insert(String::from("L_QUANTITY"), RawColumn::Double(Vec::new()));
+    columns.insert(String::from("L_EXTENDEDPRICE"), RawColumn::Double(Vec::new()));
+    columns.insert(String::from("L_DISCOUNT"), RawColumn::Double(Vec::new()));
+    columns.insert(String::from("L_TAX"), RawColumn::Double(Vec::new()));
     for f in fs::read_dir("tpc-h/sf1").unwrap() {
         let f = f.unwrap();
         let path = f.path();
@@ -43,14 +74,29 @@ fn main() {
                                 2 => Some("L_SUPPKEY"),
                                 3 => Some("L_LINENUMBER"),
                                 4 => Some("L_QUANTITY"),
+                                5 => Some("L_EXTENDEDPRICE"),
+                                6 => Some("L_DISCOUNT"),
+                                7 => Some("L_TAX"),
                                 _ => None
                             };
 
                             if let Some(col_name) = col {
-                                columns.get_mut(col_name).unwrap().push(i64::from_str_radix(value, 10).unwrap());
+                                let col = columns.get_mut(col_name).unwrap();
+                                match col {
+                                    RawColumn::BigInt(vec) => {
+                                        vec.push(i64::from_str_radix(value, 10).unwrap());
+                                    },
+                                    RawColumn::Date(vec) => {
+                                        // TODO
+                                    },
+                                    RawColumn::Double(vec) => {
+                                        let parsed = value.parse::<f64>().unwrap();
+                                        vec.push(parsed)
+                                    }
+                                }
                             }
                         }
-                        if i % 100000 == 0 {
+                        if i % 1000000 == 0 {
                             println!("{}", i);
                         }
                     }
@@ -61,26 +107,14 @@ fn main() {
 
     // domain encoding of columns
     for (name, column) in columns.iter() {
-        let mut column_with_indices: Vec<(usize, i64)> = column.iter().enumerate().map(|(i, val)| (i, *val)).collect();
-        column_with_indices.sort_by_key(|(_i, val)| *val);
-        let mut dict = Vec::new();
-        let mut current: Option<i64> = None;
-        let mut dv: Vec<ValueId> = vec![0; column_with_indices.len()];
-        for (i, val) in column_with_indices.iter() {
-            if current == Some(*val) {
-                dv[*i] = (dict.len() - 1) as ValueId;
-            } else {
-                dict.push(*val);
-                current = Some(*val);
-                dv[*i] = (dict.len() - 1) as ValueId;
-            }
+        match column {
+            RawColumn::BigInt(vec) => { create_avc(name, vec); }
+            RawColumn::Date(vec) => { create_avc(name, vec); }
+            RawColumn::Double(vec) => { create_avc(name, vec); }
         }
-        let avc = core::MainAttributeValueContainer::<i64> { data: dv, dict: Box::new(core::BigIntDict { entries: dict }) };
-        // print first 5 "rows"
-        println!("{:?}: {:?},{:?},{:?},{:?},{:?}", name, avc.lookup(0), avc.lookup(1), avc.lookup(2), avc.lookup(3), avc.lookup(4));
     }
 
-    let dict = Box::new(core::BigIntDict { entries: vec![1, 5, 7, 2311] });
+    let dict = Box::new(core::FixedSizeDict { entries: vec![1, 5, 7, 2311] });
     let mut avc = core::MainAttributeValueContainer::<i64> { data: Vec::new(), dict: dict };
     avc.data.push(1);
     avc.data.push(2);
