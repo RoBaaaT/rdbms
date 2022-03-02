@@ -15,7 +15,7 @@ use std::fs::{self};
 
 use crate::ps_protocol::handle_connection;
 use crate::threadpool::ThreadPool;
-use crate::core::AttributeValueContainer;
+use crate::core::DynAttributeValueContainer;
 use crate::core::ValueId;
 use crate::transaction::TransactionManager;
 
@@ -25,7 +25,7 @@ enum RawColumn {
     Double(Vec<f64>)
 }
 
-fn create_avc<T: 'static + Copy + PartialOrd + Sized + Send + Sync + Debug>(name: &String, column: &Vec<T>) {
+fn create_avc<T: 'static + Copy + PartialOrd + Sized + Send + Sync + Debug>(column: &Vec<T>) -> core::MainAttributeValueContainer<T> {
     let mut column_with_indices: Vec<(usize, T)> = column.iter().enumerate().map(|(i, val)| (i, *val)).collect();
     column_with_indices.sort_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let mut dict = Vec::new();
@@ -40,10 +40,7 @@ fn create_avc<T: 'static + Copy + PartialOrd + Sized + Send + Sync + Debug>(name
             dv[*i] = (dict.len() - 1) as ValueId;
         }
     }
-    let avc = core::MainAttributeValueContainer::<T> { data: dv, dict: Box::new(core::FixedSizeDict { entries: dict }) };
-    // print first 5 "rows"
-    // TODO: return avc instead
-    println!("{:?}: {:?},{:?},{:?},{:?},{:?}", name, avc.lookup(0), avc.lookup(1), avc.lookup(2), avc.lookup(3), avc.lookup(4));
+    return core::MainAttributeValueContainer::<T> { data: dv, dict: Box::new(core::FixedSizeDict { entries: dict }) };
 }
 
 fn main() {
@@ -106,12 +103,17 @@ fn main() {
     }
 
     // domain encoding of columns
+    let mut avcs: HashMap<String, Box<dyn core::DynAttributeValueContainer>> = HashMap::new();
     for (name, column) in columns.iter() {
         match column {
-            RawColumn::BigInt(vec) => { create_avc(name, vec); }
-            RawColumn::Date(vec) => { create_avc(name, vec); }
-            RawColumn::Double(vec) => { create_avc(name, vec); }
+            RawColumn::BigInt(vec) => { avcs.insert(name.to_string(), Box::new(create_avc(vec))); }
+            RawColumn::Date(vec) => { avcs.insert(name.to_string(), Box::new(create_avc(vec))); }
+            RawColumn::Double(vec) => { avcs.insert(name.to_string(), Box::new(create_avc(vec))); }
         }
+    }
+    for (name, avc) in avcs {
+        println!("{}: {}", name, avc.distinct_count());
+        //println!("{:?}: {:?},{:?},{:?},{:?},{:?}", name, avc.lookup(0), avc.lookup(1), avc.lookup(2), avc.lookup(3), avc.lookup(4));
     }
 
     let dict = Box::new(core::FixedSizeDict { entries: vec![1, 5, 7, 2311] });
