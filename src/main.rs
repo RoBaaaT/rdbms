@@ -13,6 +13,8 @@ use std::sync::RwLock;
 use std::fmt::Debug;
 use std::fs::{self};
 
+use crate::core::AttributeValueContainer;
+use crate::core::MainAttributeValueContainer;
 use crate::ps_protocol::handle_connection;
 use crate::threadpool::ThreadPool;
 use crate::core::DynAttributeValueContainer;
@@ -111,9 +113,19 @@ fn main() {
             RawColumn::Double(vec) => { avcs.insert(name.to_string(), Box::new(create_avc(vec))); }
         }
     }
-    for (name, avc) in avcs {
-        println!("{}: {}", name, avc.distinct_count());
-        //println!("{:?}: {:?},{:?},{:?},{:?},{:?}", name, avc.lookup(0), avc.lookup(1), avc.lookup(2), avc.lookup(3), avc.lookup(4));
+    for (name, _) in &avcs {
+        print!("{:>18}", name);
+    }
+    print!("\n");
+    for i in 0..10 {
+        for (name, avc) in &avcs {
+            match columns.get(name).unwrap() {
+                RawColumn::BigInt(_) => { print!("{:>18}", (avc.as_any().downcast_ref::<MainAttributeValueContainer<i64>>()).unwrap().lookup(i).unwrap()); },
+                RawColumn::Double(_) => { print!("{:>18}", (avc.as_any().downcast_ref::<MainAttributeValueContainer<f64>>()).unwrap().lookup(i).unwrap()); }
+                _ => {}
+            }
+        }
+        print!("\n");
     }
 
     let dict = Box::new(core::FixedSizeDict { entries: vec![1, 5, 7, 2311] });

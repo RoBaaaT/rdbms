@@ -1,6 +1,9 @@
+use std::any::Any;
+
 pub type ValueId = u32;
 
 pub trait DynAttributeValueContainer {
+    fn as_any(&self) -> &dyn Any;
     fn len(&self) -> usize;
     fn distinct_count(&self) -> usize;
     fn null_value_id(&self) -> ValueId;
@@ -34,7 +37,14 @@ pub struct MainAttributeValueContainer<T> {
     pub dict: Box<dyn Dict<T> + Send + Sync>
 }
 
-impl<T> DynAttributeValueContainer for MainAttributeValueContainer<T> {
+impl<T> DynAttributeValueContainer for MainAttributeValueContainer<T>
+where
+    T: 'static
+{
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn len(&self) -> usize {
         self.data.len()
     }
@@ -48,7 +58,10 @@ impl<T> DynAttributeValueContainer for MainAttributeValueContainer<T> {
     }
 }
 
-impl<T> AttributeValueContainer<T> for MainAttributeValueContainer<T> {
+impl<T> AttributeValueContainer<T> for MainAttributeValueContainer<T>
+where
+    T: 'static
+{
     fn lookup(&self, i: usize) -> Option<T> {
         let vid = self.data[i];
         if vid == self.null_value_id() {
